@@ -1,0 +1,53 @@
+# Latent-extraction config for SamudrACE-E3SMv3, derived from the
+# inference-config.yaml published at
+# https://huggingface.co/allenai/SamudrACE-E3SMv3
+#
+# Differences from the published config, and why:
+# - n_coupled_steps: 4 instead of 2920. Each coupled step is 5 model days;
+#   four is plenty to look at and keeps the latents to a few GB.
+# - n_initial_conditions: 1 instead of 3. One rollout is one set of latents.
+# - seed: 0. The atmosphere is stochastic. The ocean and atmosphere are
+#   extracted in two runs, and the reference fields come from the runs'
+#   predictions, so every run must follow the same noise sequence.
+# - save_prediction_files: true, to build the app's reference fields.
+# - n_repeats: 1, since only the first few weeks of forcing are used.
+#
+# run.sh substitutes DATA with the download directory.
+experiment_dir: DATA/run
+n_coupled_steps: 4
+coupled_steps_in_memory: 1
+seed: 0
+checkpoint_path: DATA/hf/SamudrACE-E3SMv3.tar
+data_writer:
+  ocean:
+    save_prediction_files: true
+    save_monthly_files: false
+  atmosphere:
+    save_prediction_files: true
+    save_monthly_files: false
+logging:
+  log_to_screen: true
+  log_to_wandb: false
+  log_to_file: true
+  project: WANDB-PROJECT
+  entity: WANDB-ENTITY
+forcing_loader:
+  atmosphere:
+    dataset:
+      data_path: DATA/hf/forcing_data
+      file_pattern: atmosphere-forcing-1yr.nc
+      n_repeats: 1
+  ocean:
+    dataset:
+      data_path: DATA/hf/forcing_data
+      file_pattern: ocean-forcing-1yr.nc
+      n_repeats: 1
+  num_data_workers: 0
+initial_condition:
+  ocean:
+    path: DATA/hf/initial_conditions/SamudrACE-E3SMv3-ICx3-train_ocean_ic.nc
+  atmosphere:
+    path: DATA/hf/initial_conditions/SamudrACE-E3SMv3-ICx3-train_atmosphere_ic.nc
+  start_indices:
+    first: 0
+    n_initial_conditions: 1

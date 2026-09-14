@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract latent activations from an `fme` (ACE) model run, for the visualiser.
+r"""Extract latent activations from an `fme` (ACE) model run, for the visualiser.
 
 The ``fme`` package (https://github.com/mahf708/ace) does not write internal
 activations during inference, so this script attaches forward hooks to a
@@ -66,14 +66,13 @@ Notes
   comparable across steps only where the architecture shares one latent space
   (SFNO blocks do; U-Net levels do not, which is why the app marks Samudra
   ragged).
-* Memory is the limit, during extraction and again in the app. One ACE2 block
-  at 1 degree with 256 channels is about 33 MB per timestep, times the number of
-  blocks. A full Samudra ocean at 1 degree is heavier still: the app pads every
-  level to the widest (400 channels with the default ch_width) and resamples it
-  onto the output grid, so nine levels on a 180x360 grid is roughly 0.9 GB for
-  a single timestep. Use ``--max-times``, ``--dtype float16``, and where you
-  only want some levels, a narrower ``--module-pattern`` such as
-  ``'^layers\.(0|8|16)$'``.
+* Memory is the limit, during extraction and again in the app, which pads
+  every level to the widest and resamples coarse levels onto the output grid.
+  On SamudrACE-E3SMv3 at 1 degree, one timestep is 1.2 GB for the ocean (nine
+  levels, up to 520 channels) and 0.8 GB for the atmosphere (eight blocks of
+  384). Use ``--max-times``, ``--dtype float16``, and where you only want some
+  levels, a narrower ``--module-pattern`` such as
+  ``'^(module\.)?layers\.(0|8|16)$'``.
 * The inference run itself proceeds normally and still writes its usual output
   to the config's ``experiment_dir``.
 * Deriving the first timestamp costs one extra checkpoint load. Pass
@@ -93,9 +92,11 @@ import numpy as np
 ARCHS = {
     # SFNO processor blocks: fme.ace.models.modulus.sfnonet / makani.sfnonet.
     # Every entry of `blocks` is a processor block outputting
-    # (batch, embed_dim, lat, lon), so the name alone is enough.
+    # (batch, embed_dim, lat, lon), so the name alone is enough. The stochastic
+    # NoiseConditionedSFNO (e.g. SamudrACE's atmosphere) wraps the network, so
+    # its blocks sit one level down, at conditional_model.blocks.N.
     "sfno": {
-        "pattern": r"^(module\.)?blocks\.\d+$",
+        "pattern": r"^(module\.)?(conditional_model\.)?blocks\.\d+$",
         "types": None,
         "template": "latent_grid_block_{step}_{year}_{month:02d}.npz",
     },
@@ -274,6 +275,9 @@ def to_numpy(output, dtype):
 def component_timestep(stepper, coupling, component):
     """How much model time passes between two activations of this component.
 
+    ``stepper`` is the full stepper as loaded - the CoupledStepper for a coupled
+    config, not the component's own Stepper.
+
     For a coupled stepper the ocean steps once per coupled step and the
     atmosphere ``n_inner_steps`` times within it, so they have different
     spacings.
@@ -350,6 +354,62 @@ def write_grid_file(dataset_info, path):
     print(f"wrote {path}  lat={lat.shape} lon={lon.shape} mask={shape if wet is not None else 'none'}")
 
 
+def _as_cftime(value, calendar="standard"):
+    """A cftime datetime for a cftime, datetime, pandas or ISO-string value."""
+    import cftime
+
+    if isinstance(value, cftime.datetime):
+        return value
+    if isinstance(value, str):
+        match = re.match(
+            r"^(-?\d{1,5})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?", value
+        )
+        if not match:
+            raise ValueError(f"Cannot parse {value!r} as YYYY-MM-DDTHH:MM:SS")
+        parts = [int(p) if p else 0 for p in match.groups()]
+        return cftime.datetime(*parts, calendar=calendar)
+    return cftime.datetime(
+        value.year, value.month, value.day, value.hour, value.minute, value.second,
+        calendar=calendar,
+    )
+
+
+def auto_year_offset(year):
+    """0 when pandas can represent ``year``, else a round shift into 2000-2099.
+
+    Climate-model control runs use model years like 0425, far outside pandas'
+    1677-2262 nanosecond range. Shifting by whole centuries keeps the model
+    date readable (0425 becomes 2025) and the app subtracts the offset again
+    when it displays times.
+    """
+    if 1678 <= year <= 2261:
+        return 0
+    return 2000 - (year // 100) * 100
+
+
+def model_times(first, step_delta, n_times, year_offset):
+    """Timestamps for ``n_times`` steps, stepped in the model's own calendar.
+
+    Stepping happens in cftime (so a no-leap calendar never gains a Feb 29),
+    and only then are the dates relabelled into pandas with ``year_offset``
+    added. Returns (pandas timestamps, model-calendar ISO strings).
+    """
+    import pandas as pd
+
+    delta = pd.Timedelta(step_delta).to_pytimedelta()
+    shifted, original = [], []
+    for i in range(n_times):
+        t = first + i * delta
+        original.append(t.isoformat())
+        shifted.append(
+            pd.Timestamp(
+                year=t.year + year_offset, month=t.month, day=t.day,
+                hour=t.hour, minute=t.minute, second=t.second,
+            )
+        )
+    return shifted, original
+
+
 def _group_by_month(times):
     """[( (year, month), positions ), ...] preserving time order."""
     groups = defaultdict(list)
@@ -358,8 +418,13 @@ def _group_by_month(times):
     return [(key, np.array(positions)) for key, positions in sorted(groups.items())]
 
 
-def write_latents(captured, times, out_dir, template, dtype):
-    """Write one file per hooked step, split by month, as the loaders expect."""
+def write_latents(captured, times, out_dir, template, dtype, model_time=None,
+                  year_offset=0, calendar=None):
+    """Write one file per hooked step, split by month, as the loaders expect.
+
+    ``times`` are what the app reads (pandas-representable, year-shifted if
+    needed); ``model_time`` keeps the dates in the model's own calendar.
+    """
     import pandas as pd
 
     os.makedirs(out_dir, exist_ok=True)
@@ -382,10 +447,16 @@ def write_latents(captured, times, out_dir, template, dtype):
 
         for (year, month), positions in _group_by_month(times):
             path = os.path.join(out_dir, template.format(step=step, year=year, month=month))
+            extra = {}
+            if model_time is not None:
+                extra["model_time"] = np.array(model_time)[positions]
+                extra["year_offset"] = np.array(year_offset)
+                extra["calendar"] = np.array(calendar or "standard")
             np.savez_compressed(
                 path,
                 latent=stacked[positions].astype(dtype),
                 time=np.array([t.isoformat() for t in times[positions]]),
+                **extra,
             )
             print(f"wrote {path}  shape={stacked[positions].shape}")
 
@@ -427,6 +498,10 @@ def main():
                         help="ISO timestamp of the first captured step; by default "
                              "this is derived from an inference config's initial "
                              "condition, at the cost of one extra checkpoint load")
+    parser.add_argument("--year-offset", default="auto",
+                        help="years added to model dates so pandas can hold them "
+                             "(control runs use years like 0425); 'auto' shifts only "
+                             "when needed, by whole centuries into 2000-2099")
     parser.add_argument("--list-modules", action="store_true",
                         help="print the modules that would be hooked, then exit")
     args = parser.parse_args()
@@ -469,7 +544,7 @@ def main():
         hooked = select_modules(network, pattern, types)
         for step, (name, mod) in enumerate(hooked):
             print(f"step {step}: {name}  ({type(mod).__name__})")
-        print(f"component timestep: {component_timestep(stepper, coupling, component)}")
+        print(f"component timestep: {component_timestep(full_stepper, coupling, component)}")
         if args.write_grid:
             write_grid_file(
                 component_dataset_info(full_stepper, coupling, component),
@@ -479,11 +554,12 @@ def main():
 
     # The first timestamp. Inference configs can say; evaluator configs cannot.
     first_time = None
+    initialization_time = None
     if args.start_time is not None:
-        first_time = pd.Timestamp(args.start_time)
+        first_time = _as_cftime(args.start_time)
     elif mode == "inference":
         initialization_time, _ = module._get_initialization_time_and_timestep(config)
-        initialization_time = pd.to_datetime(str(initialization_time))
+        initialization_time = _as_cftime(initialization_time)
     else:
         parser.error(
             "An evaluator config has no initial-condition block to read the start "
@@ -511,7 +587,7 @@ def main():
         hooked = select_modules(network_of(target), pattern, types)
         for step, (name, mod) in enumerate(hooked):
             handles.append(mod.register_forward_hook(make_hook(step)))
-        state["timestep"] = component_timestep(target, coupling, component)
+        state["timestep"] = component_timestep(stepper, coupling, component)
         state["dataset_info"] = component_dataset_info(stepper, coupling, component)
         print(f"hooked {len(hooked)} modules: {', '.join(n for n, _ in hooked)}")
         print(f"component timestep: {state['timestep']}")
@@ -540,15 +616,27 @@ def main():
     if step_delta is None:
         raise RuntimeError("The stepper was never loaded, so its timestep is unknown.")
     if first_time is None:
-        first_time = initialization_time + step_delta
+        first_time = initialization_time + pd.Timedelta(step_delta).to_pytimedelta()
+
+    calendar = getattr(first_time, "calendar", None) or "standard"
+    year_offset = (
+        auto_year_offset(first_time.year)
+        if args.year_offset == "auto"
+        else int(args.year_offset)
+    )
 
     n_captured = min(len(arrays) for arrays in captured.values())
     for step in list(captured):
         captured[step] = captured[step][:n_captured]
-    times = [first_time + i * step_delta for i in range(n_captured)]
-    print(f"captured {n_captured} timesteps from {times[0]} to {times[-1]}")
+    times, original = model_times(first_time, step_delta, n_captured, year_offset)
+    print(f"captured {n_captured} timesteps from {original[0]} to {original[-1]} "
+          f"({calendar} calendar)")
+    if year_offset:
+        print(f"model years shifted by {year_offset:+d} for pandas; set "
+              f"display_year_offset: {year_offset} in paths.json to show the originals")
 
-    write_latents(captured, times, args.out, template, dtype)
+    write_latents(captured, times, args.out, template, dtype,
+                  model_time=original, year_offset=year_offset, calendar=calendar)
 
     if args.write_grid and state.get("dataset_info") is not None:
         write_grid_file(state["dataset_info"], args.write_grid)

@@ -101,7 +101,8 @@ def _definitions(paths):
     ace = paths.get("ace2_era5")
     if ace:
         definitions["ace2_era5"] = {
-            "label": "ACE2 (ERA5, SFNO)",
+            "label": ace.get("label", "ACE2 (ERA5, SFNO)"),
+            "display_year_offset": ace.get("display_year_offset", 0),
             "latent": {
                 "dir": ace["latent_dir"],
                 "translator_dir": ace.get("translator_dir"),
@@ -130,7 +131,8 @@ def _definitions(paths):
     samudra = paths.get("samudra_ocean")
     if samudra:
         definitions["samudra_ocean"] = {
-            "label": "Samudra (ocean U-Net)",
+            "label": samudra.get("label", "Samudra (ocean U-Net)"),
+            "display_year_offset": samudra.get("display_year_offset", 0),
             "latent": {
                 "dir": samudra["latent_dir"],
                 "structure": "samudra_structure_1",

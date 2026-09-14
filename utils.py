@@ -881,6 +881,19 @@ def section_card(title, subtitle=None):
 # finite subset and writes NaN back everywhere else.
 
 
+def format_model_time(timestamp, year_offset=0, fmt="%Y-%m-%d %H:%M"):
+    """Format a timestamp in the model's own years.
+
+    Control runs use model years such as 0425, which pandas cannot hold, so the
+    extraction script stores them shifted by whole centuries. ``year_offset`` is
+    that shift; it is taken off again here so the UI shows the model's dates.
+    """
+    if not year_offset:
+        return timestamp.strftime(fmt)
+    year = f"{timestamp.year - int(year_offset):04d}"
+    return timestamp.strftime(fmt.replace("%Y", year))
+
+
 def step_view(latent, step):
     """Split one step of a latent array into its usable nodes and channels.
 

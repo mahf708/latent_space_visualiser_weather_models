@@ -204,65 +204,90 @@ ocean — so `--component` is required; the script refuses to guess, because
 `CoupledStepper.modules` lists the atmosphere first and picking wrong would
 silently give you the wrong model's latents.
 
-For example, with [SamudrACE-E3SMv3](https://huggingface.co/allenai/SamudrACE-E3SMv3)
-and the coupled inference config that ships with it:
+#### Worked example: SamudrACE-E3SMv3
+
+[`examples/samudrace-e3smv3/`](examples/samudrace-e3smv3) runs the whole thing
+on the published [SamudrACE-E3SMv3](https://huggingface.co/allenai/SamudrACE-E3SMv3)
+checkpoint — download, a short rollout, latent extraction for both components,
+reference fields, and the app:
 
 ```bash
-# always look first: this prints the levels and the component's timestep
-python scripts/extract_latents_fme.py config-inference.yaml \
+examples/samudrace-e3smv3/run.sh            # data goes to demo_data/samudrace_e3smv3
+```
+
+It downloads about 2.7&nbsp;GB and needs [uv](https://docs.astral.sh/uv/). On an
+M1 Max the rollout runs on the GPU and both extractions finish in a few minutes.
+Every stage skips itself when its output exists, so re-running just opens the
+app.
+
+What that checkpoint turns out to be, as reported by the extraction script:
+
+| | Ocean (Samudra) | Atmosphere (SFNO) |
+| --- | --- | --- |
+| Hooked modules | 9 × `module.layers.N` (ConvNeXtBlock) | 8 × `module.conditional_model.blocks.N` |
+| Channels | 280, 380, 480, 520, 520, 480, 380, 280, 280 | 384 at every block |
+| Level grids | 180×360 down to 11×22 and back | 180×360 |
+| Timestep | 5 days | 6 hours |
+| Land mask | yes (69% of cells are ocean) | none |
+| In the app, one timestep | 1.21&nbsp;GB | 0.80&nbsp;GB |
+
+Its channel widths are not fme's defaults, and the atmosphere is the
+*stochastic* `NoiseConditionedSFNO`, whose blocks sit one level down under
+`conditional_model` — both of which the presets now handle.
+
+Three things about real model runs that the example deals with, and that you will
+meet with your own:
+
+- **Model calendars.** The E3SMv3 control run is in model year 0425 on a no-leap
+  calendar, which pandas cannot represent (it stops at 1677). The extraction
+  script steps through time in the model's own calendar, then shifts years by
+  whole centuries into range (0425 → 2025) and stores the original dates as
+  `model_time`. Set `display_year_offset` in `paths.json` to the offset it
+  reports and the app shows the model's own years again. Override with
+  `--year-offset`.
+- **Stochastic models.** Two unseeded rollouts differ, so latents from one run
+  would not match reference fields from another. The example config sets
+  `seed: 0`, and every run follows the same noise sequence.
+- **Reference fields.** There is no ERA5 for a control run. The natural
+  reference is the rollout's own state, so the config turns on
+  `save_prediction_files` and `scripts/fme_predictions_to_reference.py`
+  stitches the initial condition and predictions into the `(time, lat, lon)`
+  file Step 2 reads, with the same year offset as the latents.
+
+#### Doing it by hand
+
+```bash
+# always look first: prints the hooked modules and the component's timestep
+python scripts/extract_latents_fme.py extract-config.yaml \
     --component ocean --list-modules
 
-# ocean: one activation per U-Net level, plus the grid and land mask
-python scripts/extract_latents_fme.py config-inference.yaml \
-    --component ocean \
-    --out samudrace/ocean/latent_data \
-    --write-grid samudrace/ocean_grid.npz \
-    --max-times 6
+python scripts/extract_latents_fme.py extract-config.yaml \
+    --component ocean --out latents/ocean --write-grid ocean_grid.npz --max-times 4
 
-# atmosphere: the SFNO blocks of the same run
-python scripts/extract_latents_fme.py config-inference.yaml \
-    --component atmosphere \
-    --out samudrace/atmos/latent_data \
-    --write-grid samudrace/atmos_grid.npz \
-    --max-times 6
+python scripts/fme_predictions_to_reference.py run/ocean \
+    reference/ocean_reference.nc --year-offset 1600
 ```
 
-`--write-grid` saves the component's latitudes, longitudes and land/ocean mask
-from the checkpoint's own dataset info, so there is no separate grid file to
-find. Then in `paths.json`:
+`--write-grid` saves the component's latitudes, longitudes and land mask from
+the checkpoint's own dataset info, so there is no separate grid file to find.
+See [`examples/samudrace-e3smv3/paths.json`](examples/samudrace-e3smv3/paths.json)
+for the matching configuration. The two components are separate entries because
+they live on different grids with different step counts; switch between them in
+the app's model selector.
 
-```json
-{
-  "samudra_ocean": {
-    "latent_dir": "samudrace/ocean/latent_data",
-    "grid_coords_filepath": "samudrace/ocean_grid.npz",
-    "reference_basepath": "samudrace/reference",
-    "reference_filename": "ocean_reference.nc",
-    "timestep_freq": "5D"
-  },
-  "ace2_era5": {
-    "latent_dir": "samudrace/atmos/latent_data",
-    "grid_coords_filepath": "samudrace/atmos_grid.npz",
-    "reference_basepath": "samudrace/reference",
-    "reference_filename": "atmos_reference.nc",
-    "reference_label": "E3SMv3"
-  }
-}
-```
+If memory is tight, extract a subset of levels with a narrower
+`--module-pattern` (for example `'^(module\.)?layers\.(0|8|16)$'`), and store the
+atmosphere as `--dtype float16`.
 
-Set `timestep_freq` to the ocean's own step (SamudrACE's ocean steps every
-5 days, not monthly like the default) — `--list-modules` prints the component
-timestep, so you do not have to guess. It is only consulted when a latent file
-does not carry its own `time` array; the extraction script always writes one, so
-you can also leave both `timestep_freq` and `timestep_hours` unset. The two
-components are separate entries because they live on different grids with
-different step counts; switch between them in the app's model selector.
+#### A caveat for Step 4 on SFNO latents
 
-The ocean side is the memory-hungry one. The app pads every level to the widest
-(400 channels with Samudra's default `ch_width`) and resamples coarse levels
-onto the output grid, so nine levels on a 180×360 grid is roughly 0.9&nbsp;GB for
-one timestep. Extract a subset of levels with a narrower `--module-pattern`
-(for example `'^layers\.(0|8|16)$'`) if that is tight.
+On the SamudrACE atmosphere, cosine similarity against a North Atlantic node is
+above about 0.6 almost everywhere on the globe. SFNO latent vectors share a large
+common component (the most active channel there is strongly negative worldwide),
+so un-centred cosine similarity mostly measures that shared offset rather than
+regional structure. Step 4 does not currently centre the latents; bear this in
+mind when reading its maps for SFNO models, and prefer Step 5's PCA, which
+centres on the selected region.
 
 ### Changing Default Parameters
 

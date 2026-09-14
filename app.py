@@ -254,6 +254,13 @@ structure = structure_for(model_cfg)
 step_name = structure.step_name
 ref_label = reference_label(model_cfg)
 st.session_state["step_name"] = step_name
+# The step name mid-sentence: "Processor step" -> "processor step", but keep
+# names that start with an acronym, like "U-Net level", as they are.
+_first_word = step_name.split()[0] if step_name else ""
+step_noun = (
+    step_name if any(c.isupper() for c in _first_word[1:])
+    else step_name[:1].lower() + step_name[1:]
+)
 if structure.description:
     st.sidebar.caption(structure.description)
 
@@ -283,7 +290,11 @@ if not available_months:
     st.stop()
 
 years = sorted({y for y, m in available_months})
-selected_year = st.sidebar.selectbox("Select Year", years)
+selected_year = st.sidebar.selectbox(
+    "Select Year",
+    years,
+    format_func=lambda y: f"{y - model_cfg.get('display_year_offset', 0):04d}",
+)
 
 months = sorted({m for y, m in available_months if y == selected_year})
 
@@ -298,7 +309,8 @@ if len(times) == 0:
     st.error(f"No forecast times found for {selected_year}-{selected_month:02d}.")
     st.stop()
 
-formatted_times = [t.strftime("%Y-%m-%d %H UTC") for t in times]
+year_offset = model_cfg.get("display_year_offset", 0)
+formatted_times = [format_model_time(t, year_offset, "%Y-%m-%d %H UTC") for t in times]
 selected_flt_time_label = st.sidebar.selectbox("Select latent forecast time", formatted_times)
 selected_flt_time = times[formatted_times.index(selected_flt_time_label)]
 
@@ -477,7 +489,7 @@ if st.session_state.get("reference_ready", False):
     # Plot
     col_plot, col_plot2 = st.columns([col_1_width, col_1_width])
     with col_plot:
-        title = f"f(t_init) | {ref_label} ({selected_var}) @ forecast initialisation ({fit_time.strftime('%Y-%m-%d %H:%M UTC')})"
+        title = f"f(t_init) | {ref_label} ({selected_var}) @ forecast initialisation ({format_model_time(fit_time, model_cfg.get('display_year_offset', 0), '%Y-%m-%d %H:%M UTC')})"
         if selected_level_value is not None:
             title += f", for {level_dim}={selected_level_value}"
 
@@ -609,7 +621,7 @@ def _compute_step3_results():
         st.session_state["top_channels_idx"] = None
         st.session_state["step3_done"] = False
         st.warning(
-            f"No latent channels carry data at the final {step_name.lower()} for the "
+            f"No latent channels carry data at the final {step_noun} for the "
             "selected nodes."
         )
         return
@@ -652,7 +664,7 @@ def _render_step3_outputs():
 
     st.caption(
         f"Found {len(indices)} latent nodes. Use the side bar to select the "
-        f"{step_name.lower()} for the histogram of channel activations below."
+        f"{step_noun} for the histogram of channel activations below."
     )
 
     st.sidebar.markdown("## Step 3 Settings")
@@ -667,7 +679,7 @@ def _render_step3_outputs():
             0,
             n_steps - 1,
             key="selected_proc_step",
-            help=f"Index into the {n_steps} {step_name.lower()}s stored for this model "
+            help=f"Index into the {n_steps} {step_noun}s stored for this model "
                  f"(labels: {steps[0]}...{steps[-1]}).",
         )
     else:
@@ -675,10 +687,10 @@ def _render_step3_outputs():
 
     if has_ragged_channels(model_cfg):
         st.info(
-            f"This model's {step_name.lower()}s have different channel widths and "
+            f"This model's {step_noun}s have different channel widths and "
             "resolutions, so channel *k* is a different feature at each of them. "
             "Compare channels within one "
-            f"{step_name.lower()}; read the cross-{step_name.lower()} line plot as "
+            f"{step_noun}; read the cross-{step_noun} line plot as "
             "activation strength only. Coarse levels are shown resampled onto the "
             "model's output grid, and gaps mean the channel does not exist there."
         )
@@ -700,7 +712,7 @@ def _render_step3_outputs():
             )       
         ax_line.set_xlabel(step_name)
         ax_line.set_ylabel("Max Latent Activation (selected nodes)")
-        ax_line.set_title(f"Max value of top {N_top} latent channels across {step_name.lower()}s in selected region")
+        ax_line.set_title(f"Max value of top {N_top} latent channels across {step_noun}s in selected region")
         ax_line.legend()
         st.pyplot(fig_line)
 
@@ -723,7 +735,7 @@ def _render_step3_outputs():
             )
         ax_hist.set_xlabel("Latent value")
         ax_hist.set_ylabel("Density")
-        ax_hist.set_title(f"Histogram of top {N_top} latent channels at {step_name.lower()} {selected_proc_step} over globe")
+        ax_hist.set_title(f"Histogram of top {N_top} latent channels at {step_noun} {selected_proc_step} over globe")
         ax_hist.legend()
         plt.tight_layout()
         st.pyplot(fig_hist_top)
@@ -731,7 +743,7 @@ def _render_step3_outputs():
     st.session_state["export_figures"]["fig_line"] = fig_line
     st.session_state["export_figures"]["fig_hist_top"] = fig_hist_top
 
-    st.caption(f"Note on line plot above: Shows max value of top {N_top} channels within the selected region, with the {N_top} channels having been selected at the final {step_name.lower()}.")
+    st.caption(f"Note on line plot above: Shows max value of top {N_top} channels within the selected region, with the {N_top} channels having been selected at the final {step_noun}.")
 
     # Tile plots
     st.markdown(f"### Global activations of top {N_top} latent channels")
@@ -765,7 +777,7 @@ if st.session_state.get("reference_ready", False) and st.session_state.get("loca
 Extract latent representations for whole globe. Identify those in selected region and explore their strongest activations.
 
 - Latent nodes within the selected area are identified.
-- Latent features are loaded for all """ + step_name.lower() + """s.
+- Latent features are loaded for all """ + step_noun + """s.
 - The most strongly activated latent channels are selected for further analysis.
 - Global activation maps and summary plots are shown below.
         """
@@ -849,8 +861,8 @@ Compare the selected region with the rest of the globe using cosine similarity.
         if channel_idx.size == 0 or not node_has_data.any():
             st.session_state["step4_done"] = False
             st.error(
-                f"There is no latent data at {step_name.lower()} {selected_proc_step}. "
-                f"Choose a different {step_name.lower()}."
+                f"There is no latent data at {step_noun} {selected_proc_step}. "
+                f"Choose a different {step_noun}."
             )
             return
 
@@ -859,7 +871,7 @@ Compare the selected region with the rest of the globe using cosine similarity.
         if not candidates:
             st.session_state["step4_done"] = False
             st.error(
-                f"None of the selected nodes carry data at {step_name.lower()} "
+                f"None of the selected nodes carry data at {step_noun} "
                 f"{selected_proc_step}."
             )
             return
@@ -873,7 +885,7 @@ Compare the selected region with the rest of the globe using cosine similarity.
         if top_present.size == 0:
             st.session_state["step4_done"] = False
             st.error(
-                f"None of the top {N_top} channels exist at {step_name.lower()} "
+                f"None of the top {N_top} channels exist at {step_noun} "
                 f"{selected_proc_step}."
             )
             return
@@ -949,7 +961,7 @@ Compare the selected region with the rest of the globe using cosine similarity.
 
         st.caption(
             f"Compared against latent node {st.session_state.get('reference_node')} "
-            f"at {step_name.lower()} {int(st.session_state['selected_proc_step'])}, using "
+            f"at {step_noun} {int(st.session_state['selected_proc_step'])}, using "
             f"{st.session_state.get('cosine_channels_used')} channels."
         )
         # save plots to session state for later:    
@@ -1020,8 +1032,8 @@ Apply PCA to latent features in the selected region and project the learned comp
         if channel_idx.size == 0 or not node_has_data.any():
             st.session_state["step5_done"] = False
             st.error(
-                f"There is no latent data at {step_name.lower()} {selected_proc_step}. "
-                f"Choose a different {step_name.lower()}."
+                f"There is no latent data at {step_noun} {selected_proc_step}. "
+                f"Choose a different {step_noun}."
             )
             return
 
@@ -1029,7 +1041,7 @@ Apply PCA to latent features in the selected region and project the learned comp
         if fit_rows.size == 0:
             st.session_state["step5_done"] = False
             st.error(
-                f"None of the selected nodes carry data at {step_name.lower()} "
+                f"None of the selected nodes carry data at {step_noun} "
                 f"{selected_proc_step}."
             )
             return
