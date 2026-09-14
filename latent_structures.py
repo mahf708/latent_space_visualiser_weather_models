@@ -592,7 +592,16 @@ def times_for_month(year: int, month: int, model_cfg: dict, n_times: int | None 
 
     freq = model_cfg.get("timestep_freq")
     if freq is None:
-        freq = f"{int(model_cfg.get('timestep_hours', 6))}h"
+        hours = model_cfg.get("timestep_hours", 6)
+        if hours is None:
+            raise ValueError(
+                "This model sets neither timestep_freq nor timestep_hours, so the "
+                "spacing between latent timesteps is unknown. Set one in "
+                "paths.json, or store a 'time' array in the latent files (the "
+                "extraction script does this, and prints the component's "
+                "timestep so you know what to set)."
+            )
+        freq = f"{int(hours)}h"
 
     if n_times is not None:
         return pd.date_range(start=start, periods=int(n_times), freq=freq)

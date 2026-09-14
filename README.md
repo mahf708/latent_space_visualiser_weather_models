@@ -184,10 +184,85 @@ python scripts/extract_latents_fme.py config-inference.yaml \
 ```
 
 `--arch sfno` hooks the SFNO processor blocks and writes files
-`ace_structure_1` reads; `--arch samudra` hooks the U-Net levels and writes files
-`samudra_structure_1` reads. Anything else: pass `--module-pattern` with a regex
-matched against `model.named_modules()`. This script needs `torch` and `fme`,
-which the app itself does not, so they are not in `requirements.txt`.
+`ace_structure_1` reads; `--arch samudra` hooks the U-Net's ConvNeXt blocks
+(one activation per level, skipping the pooling, upsampling and output layers)
+and writes files `samudra_structure_1` reads. Anything else: pass
+`--module-pattern` with a regex matched against `model.named_modules()`, and
+`--module-types` to filter by class. This script needs `torch` and `fme`, which
+the app itself does not, so they are not in `requirements.txt`.
+
+The script reads whichever config you already run the model with and works out
+which of fme's four entry points it belongs to: `n_forward_steps` means the
+single-network path, `n_coupled_steps` the coupled one, and within each a
+`loader` means an evaluator config while `initial_condition` + `forcing_loader`
+means an inference config.
+
+### Coupled models (SamudrACE)
+
+A coupled checkpoint holds two networks — an SFNO atmosphere and a Samudra
+ocean — so `--component` is required; the script refuses to guess, because
+`CoupledStepper.modules` lists the atmosphere first and picking wrong would
+silently give you the wrong model's latents.
+
+For example, with [SamudrACE-E3SMv3](https://huggingface.co/allenai/SamudrACE-E3SMv3)
+and the coupled inference config that ships with it:
+
+```bash
+# always look first: this prints the levels and the component's timestep
+python scripts/extract_latents_fme.py config-inference.yaml \
+    --component ocean --list-modules
+
+# ocean: one activation per U-Net level, plus the grid and land mask
+python scripts/extract_latents_fme.py config-inference.yaml \
+    --component ocean \
+    --out samudrace/ocean/latent_data \
+    --write-grid samudrace/ocean_grid.npz \
+    --max-times 6
+
+# atmosphere: the SFNO blocks of the same run
+python scripts/extract_latents_fme.py config-inference.yaml \
+    --component atmosphere \
+    --out samudrace/atmos/latent_data \
+    --write-grid samudrace/atmos_grid.npz \
+    --max-times 6
+```
+
+`--write-grid` saves the component's latitudes, longitudes and land/ocean mask
+from the checkpoint's own dataset info, so there is no separate grid file to
+find. Then in `paths.json`:
+
+```json
+{
+  "samudra_ocean": {
+    "latent_dir": "samudrace/ocean/latent_data",
+    "grid_coords_filepath": "samudrace/ocean_grid.npz",
+    "reference_basepath": "samudrace/reference",
+    "reference_filename": "ocean_reference.nc",
+    "timestep_freq": "5D"
+  },
+  "ace2_era5": {
+    "latent_dir": "samudrace/atmos/latent_data",
+    "grid_coords_filepath": "samudrace/atmos_grid.npz",
+    "reference_basepath": "samudrace/reference",
+    "reference_filename": "atmos_reference.nc",
+    "reference_label": "E3SMv3"
+  }
+}
+```
+
+Set `timestep_freq` to the ocean's own step (SamudrACE's ocean steps every
+5 days, not monthly like the default) — `--list-modules` prints the component
+timestep, so you do not have to guess. It is only consulted when a latent file
+does not carry its own `time` array; the extraction script always writes one, so
+you can also leave both `timestep_freq` and `timestep_hours` unset. The two
+components are separate entries because they live on different grids with
+different step counts; switch between them in the app's model selector.
+
+The ocean side is the memory-hungry one. The app pads every level to the widest
+(400 channels with Samudra's default `ch_width`) and resamples coarse levels
+onto the output grid, so nine levels on a 180×360 grid is roughly 0.9&nbsp;GB for
+one timestep. Extract a subset of levels with a narrower `--module-pattern`
+(for example `'^layers\.(0|8|16)$'`) if that is tight.
 
 ### Changing Default Parameters
 
