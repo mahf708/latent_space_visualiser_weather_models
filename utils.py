@@ -16,12 +16,15 @@ Utility for:
 2 - mesh_features_to_latlon - converts Graphcast mesh node features to coordinates on mesh node grid
 3 - plot_global_data_with_overlay - plots 2D geospatial data (lat x lon) on a global Cartopy map with optional overlay points.
 3b - plot_global_residual_with_overlay - for residual. Colourbar centred at zero.
-4 - select_nodes_within_radius - select indices of mesh nodes within a given radius from a centre point
-5 - plot_global_overlay_only - plot data (e.g. latent channel value) on mesh nodes
+4 - select_nodes_within_radius - select indices of latent nodes within a given radius from a centre point
+5 - plot_global_overlay_only - plot data (e.g. latent channel value) on latent nodes,
+    as a scatter for unstructured meshes or a pcolormesh for regular grids
 6 - apply_translator - apply translator to latent features for an individual timestep and processor step, for all mesh nodes and latent channels
 7 - dataframe_to_figure - render a pandas DataFrame as a matplotlib figure for PDF export
 8 - apply_theme_css - app theme helper
-9 - section_card - adds heirarchy to app 
+9 - section_card - adds heirarchy to app
+10 - step_view / nanmax_abs / scatter_to_nodes / cosine_similarity_to - latent
+     array helpers that work on the finite subset of a NaN-padded latent array
 """
 
 # ----------------------------------------------------
@@ -317,17 +320,20 @@ def plot_global_residual_with_overlay(
 
 def select_nodes_within_radius(latitudes: np.ndarray, longitudes: np.ndarray,
                                center_lat: float, center_lon: float,
-                               radius_km: float):
+                               radius_km: float, valid: np.ndarray = None):
     """
-    Select indices of mesh nodes within a given radius from a center point.
-    
+    Select indices of latent nodes within a given radius from a center point.
+
     Args:
         latitudes: np.ndarray of shape (num_nodes,)
         longitudes: np.ndarray of shape (num_nodes,)
         center_lat: latitude of center point in degrees
         center_lon: longitude of center point in degrees
         radius_km: radius in kilometers
-    
+        valid: optional boolean mask of shape (num_nodes,). Nodes that are
+            False carry no latent data (e.g. land points of an ocean model)
+            and are never selected.
+
     Returns:
         indices: np.ndarray of selected indices
     """
@@ -348,7 +354,10 @@ def select_nodes_within_radius(latitudes: np.ndarray, longitudes: np.ndarray,
     distances = R * c  # distance in km
 
     # Select indices within radius
-    indices = np.where(distances <= radius_km)[0]
+    inside = distances <= radius_km
+    if valid is not None:
+        inside &= np.asarray(valid, dtype=bool)
+    indices = np.where(inside)[0]
     return indices
 
 # ---------------------------------------------------
@@ -364,17 +373,29 @@ def plot_global_overlay_only(
     circle_lats=None,
     dpi=100,
     cmap="PRGn",
+    grid_shape=None,
 ):
     """
-    Plot overlay values on a global Cartopy map without a background field.
-    Overlay colors are fully opaque and zero-centered.
+    Plot latent node values on a global Cartopy map without a background field.
+    Colors are fully opaque and zero-centered.
+
+    Nodes may be an unstructured mesh (GraphCast) or a flattened regular grid
+    (ACE, Samudra). When ``grid_shape`` is given the values are drawn with
+    pcolormesh, which fills the map correctly and is much faster than scattering
+    one marker per grid cell; otherwise they are drawn as a scatter of nodes.
+
+    Non-finite values are left blank. That is how the app shows nodes with no
+    data: land points for an ocean model, and channels that do not exist at the
+    selected step of a ragged (U-Net) architecture.
 
     Args:
-        overlay_lats (np.ndarray): latitudes of overlay points
-        overlay_lons (np.ndarray): longitudes of overlay points
-        overlay_values (np.ndarray): values to plot at overlay points
+        overlay_lats (np.ndarray): latitudes of the nodes
+        overlay_lons (np.ndarray): longitudes of the nodes
+        overlay_values (np.ndarray): values to plot at the nodes
         circle_lons (np.ndarray): optional circle longitude coordinates
         circle_lats (np.ndarray): optional circle latitude coordinates
+        grid_shape (tuple): optional (n_lat, n_lon) if the nodes are a
+            row-major flattened regular grid
     """
 
     # Create figure
@@ -409,34 +430,72 @@ def plot_global_overlay_only(
 
     # --- Overlay only ---
     if overlay_lats is not None and overlay_lons is not None and overlay_values is not None:
-        overlay_values = np.asarray(overlay_values).flatten()
+        overlay_lats = np.asarray(overlay_lats, dtype=float).ravel()
+        overlay_lons = np.asarray(overlay_lons, dtype=float).ravel()
+        overlay_values = np.asarray(overlay_values, dtype=float).ravel()
 
-        max_abs = np.max(np.abs(overlay_values))
-
-        norm = TwoSlopeNorm(
-            vmin=-max_abs,
-            vcenter=0.0,
-            vmax=max_abs,
-        )
-
+        finite = np.isfinite(overlay_values)
         cmap = plt.get_cmap(cmap)
 
-        colors = cmap(norm(overlay_values))
-        colors[:, -1] = 1.0  # fully opaque
+        if not finite.any():
+            ax.set_title(title)
+            ax.text(
+                0.5, 0.5, "no data at these nodes",
+                transform=ax.transAxes, ha="center", va="center", fontsize=11,
+            )
+            return fig
 
-        sc = ax.scatter(
-            overlay_lons,
-            overlay_lats,
-            s=10,
-            c=colors,
-            transform=ccrs.PlateCarree(),
-            zorder=3,
-        )
+        max_abs = float(np.max(np.abs(overlay_values[finite])))
+        if max_abs == 0.0 or not np.isfinite(max_abs):
+            # TwoSlopeNorm needs vmin < vcenter < vmax; a constant-zero field
+            # would otherwise raise.
+            max_abs = 1.0
+
+        norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
+
+        if grid_shape is not None:
+            # Regular grid: draw filled cells. Longitudes are wrapped into
+            # -180 -> 180, which can leave a row starting mid-way round the
+            # globe, so roll each row back into increasing order first.
+            n_lat, n_lon = grid_shape
+            lat2d = overlay_lats.reshape(n_lat, n_lon)
+            lon2d = overlay_lons.reshape(n_lat, n_lon)
+            values2d = overlay_values.reshape(n_lat, n_lon)
+
+            shift = int(np.argmin(lon2d[0]))
+            if shift:
+                lat2d = np.roll(lat2d, -shift, axis=1)
+                lon2d = np.roll(lon2d, -shift, axis=1)
+                values2d = np.roll(values2d, -shift, axis=1)
+
+            ax.pcolormesh(
+                lon2d,
+                lat2d,
+                np.ma.masked_invalid(values2d),
+                cmap=cmap,
+                norm=norm,
+                transform=ccrs.PlateCarree(),
+                shading="nearest",
+                rasterized=True,
+                zorder=3,
+            )
+        else:
+            colors = cmap(norm(overlay_values[finite]))
+            colors[:, -1] = 1.0  # fully opaque
+
+            ax.scatter(
+                overlay_lons[finite],
+                overlay_lats[finite],
+                s=10,
+                c=colors,
+                transform=ccrs.PlateCarree(),
+                zorder=3,
+            )
 
         # Colorbar
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        
+
         cbar = fig.colorbar(sm, ax=ax, orientation="vertical", fraction=0.03, pad=0.02)
         cbar.ax.tick_params(labelsize=12, pad=4)
         for tick in cbar.ax.get_yticklabels():
@@ -811,3 +870,60 @@ def section_card(title, subtitle=None):
 
     if subtitle:
         st.markdown(subtitle)
+
+
+# ---------------------------------------------------
+# --- 10. Latent array helpers
+# ---------------------------------------------------
+# Latents arrive as (n_steps, n_nodes, latent_dim) whatever the model. Nodes
+# with no data (land for an ocean model) and channels that do not exist at a
+# step (ragged U-Net levels) are NaN, so every statistic below works on the
+# finite subset and writes NaN back everywhere else.
+
+
+def step_view(latent, step):
+    """Split one step of a latent array into its usable nodes and channels.
+
+    Returns:
+        (node_has_data, channel_idx) where ``node_has_data`` is a boolean mask
+        over nodes and ``channel_idx`` indexes the channels that exist at this
+        step at every node that has data.
+    """
+    step_latents = np.asarray(latent[step])
+    finite = np.isfinite(step_latents)
+    node_has_data = finite.any(axis=1)
+    if not node_has_data.any():
+        return node_has_data, np.empty(0, dtype=int)
+    channel_present = finite[node_has_data].all(axis=0)
+    return node_has_data, np.flatnonzero(channel_present)
+
+
+def nanmax_abs(values, axis):
+    """Maximum absolute value along an axis, returning NaN for empty slices."""
+    values = np.abs(np.asarray(values, dtype=float))
+    finite_any = np.isfinite(values).any(axis=axis)
+    filled = np.where(np.isfinite(values), values, -np.inf)
+    out = np.max(filled, axis=axis)
+    return np.where(finite_any, out, np.nan)
+
+
+def scatter_to_nodes(values, node_mask, n_nodes, n_cols=None):
+    """Place per-valid-node results back into a full-length NaN array."""
+    if n_cols is None:
+        full = np.full(n_nodes, np.nan)
+    else:
+        full = np.full((n_nodes, n_cols), np.nan)
+    full[node_mask] = values
+    return full
+
+
+def cosine_similarity_to(reference, matrix):
+    """Cosine similarity between one latent vector and each row of ``matrix``."""
+    reference = np.asarray(reference, dtype=float)
+    matrix = np.asarray(matrix, dtype=float)
+    ref_norm = np.linalg.norm(reference)
+    row_norms = np.linalg.norm(matrix, axis=1)
+    denominator = row_norms * ref_norm
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sims = (matrix @ reference) / denominator
+    return np.where(denominator > 0, sims, np.nan)

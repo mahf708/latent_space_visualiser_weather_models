@@ -4,5 +4,18 @@
     "translator_dir": "./demo_data/graphcast_small/translators",
     "era5_basepath": "./demo_data/graphcast_small/era5",
     "graph_coords_filepath": "./demo_data/graphcast_small/mesh_nodes.npy"
+  },
+  "ace2_era5": {
+    "latent_dir": "./demo_data/ace2_era5/latent_data",
+    "reference_basepath": "./demo_data/ace2_era5/reference",
+    "reference_filename": "ace2_era5_reference_{ym_str}.nc",
+    "reference_label": "ERA5"
+  },
+  "samudra_ocean": {
+    "latent_dir": "./demo_data/samudra_ocean/latent_data",
+    "reference_basepath": "./demo_data/samudra_ocean/reference",
+    "reference_filename": "samudra_reference.nc",
+    "reference_label": "Ocean reanalysis",
+    "grid_coords_filepath": "./demo_data/samudra_ocean/ocean_grid.npz"
   }
 }
