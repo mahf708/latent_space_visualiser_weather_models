@@ -215,6 +215,12 @@ reference fields, and the app:
 examples/samudrace-e3smv3/run.sh            # data goes to demo_data/samudrace_e3smv3
 ```
 
+The example's own [guide](examples/samudrace-e3smv3/README.md) walks through
+running it, places to explore in the app, seven further analyses
+(`examples/samudrace-e3smv3/analysis.py`: linear probes, CKA, dimensionality,
+centred similarity, a channel dictionary, regional similarity, and stochastic
+spread between seeds), how to change the experiment, and how to read the results.
+
 It downloads about 2.7&nbsp;GB and needs [uv](https://docs.astral.sh/uv/). On an
 M1 Max the rollout runs on the GPU and both extractions finish in a few minutes.
 Every stage skips itself when its output exists, so re-running just opens the
