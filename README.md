@@ -80,8 +80,9 @@ built from a handful of smooth patterns on the sphere so the analyses produce
 recognisable structure; they are not model output and say nothing about any real
 model. Use `--models ace samudra` to generate only some of them.
 
-A worked walkthrough of the demo, including what to expect at each step, is
-published here: https://claude.ai/public/artifacts/PLACEHOLDER
+A worked walkthrough of the demo, including what to expect at each step and how
+the three model families differ, is published here:
+https://claude.ai/code/artifact/03975af3-d778-4994-a111-e0fa04bcb281
 
 ## Running the App
 
